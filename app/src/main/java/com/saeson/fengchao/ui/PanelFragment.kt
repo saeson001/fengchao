@@ -21,7 +21,7 @@ class PanelFragment : Fragment() {
     private val entries = listOf(
         Entry("v2c 网页管理端", "走 CF 前置，手机可用", "http://3x.820804.xyz:2095/manage"),
         Entry("140 3x-ui 面板", "147.79.20.66:8284（直连）", "http://147.79.20.66:8284/mGo8HWHf/"),
-        Entry("185 3x-ui 面板", "IP 被墙，手机大概率打不开", "http://185.115.207.27:8284/")
+        Entry("185 3x-ui 面板", "IP 被墙，手机大概率打不开", "http://185.115.207.15:8284/")
     )
 
     override fun onCreateView(
