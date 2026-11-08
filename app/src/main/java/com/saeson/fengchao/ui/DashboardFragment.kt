@@ -4,8 +4,11 @@ import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.widget.AdapterView
+import android.widget.ArrayAdapter
 import android.widget.LinearLayout
 import android.widget.ProgressBar
+import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
 import androidx.fragment.app.Fragment
@@ -19,13 +22,24 @@ import com.saeson.fengchao.data.PanelClientsResp
 /**
  * VPS 看板（只读）：数据来自 panel-clients（全部已配置面板的启用客户端）
  * 与 global-config（面板清单，用于判断在线/离线）。
+ * 顶部 Spinner 切换面板（185 / 147），下拉刷新仅在列表位于顶部时生效。
  */
 class DashboardFragment : Fragment() {
 
     private lateinit var swipe: SwipeRefreshLayout
+    private lateinit var scroll: android.widget.ScrollView
+    private lateinit var spinner: Spinner
     private lateinit var progress: ProgressBar
     private lateinit var container: LinearLayout
     private lateinit var tvEmpty: TextView
+
+    // 最近一次成功加载的缓存
+    private var cachedHosts: List<String> = emptyList()      // 展示顺序
+    private var cachedClients: Map<String, List<PanelClient>> = emptyMap()
+    private var cachedBadPanels: Set<String> = emptySet()
+    private var cachedErrors: List<String> = emptyList()
+
+    private var selectedHost: String? = null   // 记住当前选择，刷新后还原
 
     override fun onCreateView(
         inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?
@@ -33,10 +47,34 @@ class DashboardFragment : Fragment() {
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         swipe = view.findViewById(R.id.swipe)
+        scroll = view.findViewById(R.id.scroll)
+        spinner = view.findViewById(R.id.spinner_panel)
         progress = view.findViewById(R.id.progress)
         container = view.findViewById(R.id.container)
         tvEmpty = view.findViewById(R.id.tv_empty)
+
+        // 仅当列表滚到顶部时才允许下拉刷新
+        scroll.viewTreeObserver.addOnScrollChangedListener {
+            swipe.isEnabled = !scroll.canScrollVertically(-1)
+        }
+        scroll.setOnScrollChangeListener { _, _, _, _, _ ->
+            swipe.isEnabled = !scroll.canScrollVertically(-1)
+        }
+
         swipe.setOnRefreshListener { load() }
+
+        spinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, v: View?, pos: Int, id: Long) {
+                val host = cachedHosts.getOrNull(pos) ?: return
+                if (host != selectedHost) {
+                    selectedHost = host
+                    renderSelected()
+                }
+            }
+
+            override fun onNothingSelected(parent: AdapterView<*>?) {}
+        }
+
         load()
     }
 
@@ -49,7 +87,6 @@ class DashboardFragment : Fragment() {
         progress.visibility = View.VISIBLE
         tvEmpty.visibility = View.GONE
 
-        // 先取面板清单，再取客户端；两个都回来后渲染
         var gcfgSources: List<String>? = null
         var clientsResp: Api.Resp? = null
 
@@ -61,7 +98,6 @@ class DashboardFragment : Fragment() {
             progress.visibility = View.GONE
             swipe.isRefreshing = false
 
-            container.removeAllViews()
             if (!resp.ok) {
                 Toast.makeText(requireContext(), resp.errMsg("看板数据加载失败"), Toast.LENGTH_LONG).show()
                 return
@@ -71,27 +107,30 @@ class DashboardFragment : Fragment() {
                 e.substringAfterLast(": ", "").ifBlank { null }
             }.toSet()
 
-            if (sources.isNotEmpty()) {
-                for (host in sources) {
-                    val online = host !in badPanels
-                    addStatusRow(host, online)
-                }
-            }
-            if (data.errors.isNotEmpty()) {
-                for (e in data.errors) addNoteRow("面板异常：$e")
-            }
+            val grouped = data.clients.groupBy { it.panel_host }
+            // 展示顺序：global-config 源顺序优先，其余按出现顺序追加
+            val hosts = (sources.filter { grouped.containsKey(it) } +
+                    grouped.keys.filter { it !in sources }).distinct()
+
+            cachedHosts = hosts
+            cachedClients = grouped
+            cachedBadPanels = badPanels
+            cachedErrors = data.errors
+
             if (data.clients.isEmpty()) {
                 tvEmpty.visibility = View.VISIBLE
+                container.removeAllViews()
                 return
             }
             tvEmpty.visibility = View.GONE
-            val grouped = data.clients.groupBy { it.panel_host }
-            for ((host, clients) in grouped) {
-                addSectionRow("$host（${clients.size} 个客户端）")
-                for (c in clients.sortedByDescending { it.up + it.down }) {
-                    addClientRow(c)
-                }
+
+            setupSpinner()
+            if (selectedHost == null || selectedHost !in hosts) selectedHost = hosts.firstOrNull()
+            val idx = hosts.indexOf(selectedHost)
+            if (idx >= 0 && spinner.selectedItemPosition != idx) {
+                spinner.setSelection(idx, false)
             }
+            renderSelected()
         }
 
         Api.globalConfig { r ->
@@ -116,6 +155,30 @@ class DashboardFragment : Fragment() {
         }
     }
 
+    private fun setupSpinner() {
+        val labels = cachedHosts.map { h ->
+            val n = cachedClients[h]?.size ?: 0
+            "$h（$n 个客户端）"
+        }
+        val adapter = ArrayAdapter(requireContext(), android.R.layout.simple_spinner_item, labels)
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+        spinner.adapter = adapter
+    }
+
+    /** 按当前 selectedHost 重渲染列表（不重新拉接口） */
+    private fun renderSelected() {
+        if (!isAdded) return
+        container.removeAllViews()
+        val host = selectedHost ?: return
+
+        addStatusRow(host, host !in cachedBadPanels)
+
+        for (e in cachedErrors) addNoteRow("面板异常：$e")
+
+        val clients = cachedClients[host].orEmpty().sortedByDescending { it.up + it.down }
+        for (c in clients) addClientRow(c)
+    }
+
     private fun addStatusRow(host: String, online: Boolean) {
         val ctx = requireContext()
         val tv = TextView(ctx)
@@ -123,14 +186,6 @@ class DashboardFragment : Fragment() {
         tv.text = if (online) "● $host  在线" else "● $host  异常/离线"
         tv.setTextColor(ctx.getColor(if (online) R.color.state_ok else R.color.state_bad))
         tv.textSize = 15f
-        container.addView(tv)
-    }
-
-    private fun addSectionRow(title: String) {
-        val tv = TextView(requireContext())
-        tv.setPadding(dp(16), dp(14), dp(16), dp(4))
-        tv.text = title
-        tv.textSize = 14f
         container.addView(tv)
     }
 
